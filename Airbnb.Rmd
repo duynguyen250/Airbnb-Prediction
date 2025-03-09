@@ -1,0 +1,747 @@
+---
+title: "Data Cleaning and EDA"
+author: "Duy Nguyen"
+date: "2024-10-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r price missing values analysis}
+library(tidyverse)
+listings = read.csv("listings.csv")
+
+#Change the price string into numeric
+# Substitution in steps
+# Remove $ first, then the ,
+listings$price = gsub("^\\$","",listings$price)
+listings$price = gsub(",*","",listings$price)
+listings$price = as.numeric(listings$price)
+
+#NA into super host
+listings = listings %>% mutate(host_is_superhost = na_if(host_is_superhost,""))
+
+# Check for columns with NA and their numbers
+missings = colSums(is.na(listings)) 
+true_miss = missings[missings > 0]/nrow(listings)
+true_miss_df = data.frame(value=true_miss,features=names(true_miss),type=sapply(listings[,names(true_miss)],class))
+true_miss_df
+missings
+length(true_miss_df$type)
+library(ggplot2)
+ggplot(true_miss_df) + geom_col(aes(x=value,y=reorder(features,value),fill=type)) +
+  ggtitle("Proportions of Features with Missing Values") + xlab("Proportion") +ylab("Features") 
+```
+```{r EDA}
+plot(density(na.omit(listings$price)),main="Distribution of Price")
+summary(listings$price)
+
+df_num = listings[, !sapply(listings, is.character)]
+
+df_num = df_num %>% select(c("host_listings_count",
+             "latitude",
+             "longitude",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating") | starts_with("review"))
+dim(df_num)
+library(corrplot)
+
+cor_mat= cor(df_num, use = "pairwise.complete.obs")
+cor_plot = corrplot(cor_mat, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 50)
+
+listings %>% count(host_is_superhost)
+```
+
+neighbourhood_group_cleansed, calendar_updated will be removed for having only NAs data. 
+```{r MA analysis}
+# Removing neighbourhood_group_cleansed, calendar_updated 
+listings = listings %>% select(!c(neighbourhood_group_cleansed,calendar_updated))
+
+missings = colSums(is.na(listings)) 
+missings[missings > 0]/nrow(listings)
+
+# Check to see if MA overlaps with columns with the same proportion
+
+
+
+na_price = which(is.na(listings$price))
+na_bathrooms = which(is.na(listings$bathrooms))
+sum(na_price == na_bathrooms)/length(na_price)
+
+na_cleanliness = which(is.na(listings$review_scores_communication)) 
+na_communication = which(is.na(listings$review_scores_cleanliness))
+sum(na_cleanliness == na_communication)/length(na_cleanliness)
+
+na_location = which(is.na(listings$review_scores_location))
+na_value = which(is.na(listings$review_scores_value))
+na_checkin = which(is.na(listings$review_scores_checkin))
+sum(na_location == na_value)/length(na_value)
+sum(na_location == na_checkin)/length(na_value)
+
+na_rating = which(is.na(listings$review_scores_rating)) 
+na_month = which(is.na(listings$reviews_per_month))
+sum(na_rating == na_month)/length(na_month)
+
+
+df = listings %>% select(starts_with("review"))
+
+cor(df, use = "pairwise.complete.obs")
+
+df_num = listings[, !sapply(listings, is.character)]
+
+cor(df_num, use="na.or.complete")
+```
+Out of the 12 missing values, there are 4 groups that have the missing values on the same row. 
+
+# Median Imputation
+We will czreate multiple sets of dataset using different methods of imputation
+```{r median/mode imputation}
+df_impute_ori = listings
+col_missing = names(missings[missings > 0])
+str(listings[,col_missing])
+
+
+#Impute the continuous variables with median 
+col_missing_cont = col_missing[-1]
+for (e in col_missing_cont){
+  mv_index = is.na(df_impute_ori[,e])
+  df_impute_ori[mv_index,e] = median(df_impute_ori[,e], na.rm=T)
+}
+
+#Impute the host_is_superhost with mode 
+df_impute_ori %>% count(host_is_superhost)
+# Since most of the host are not superhost then the impute missing with "f"
+df_impute_ori = df_impute_ori %>% mutate(host_is_superhost = replace_na(host_is_superhost,"f"))
+
+# Select features to use
+
+df_impute_ori = df_impute_ori %>% select(c("host_listings_count",
+             "neighbourhood_cleansed",
+             "latitude",
+             "longitude",
+             "property_type",
+             "room_type",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating",
+             "host_is_superhost") | starts_with("review"))
+```
+## Regression
+```{r price}
+# Linear Regression
+df_impute = df_impute_ori %>% mutate(price = listings$price) %>% filter(!is.na(price))
+
+dim(df_impute)
+# Create df with one hot encoding
+X = model.matrix(price ~ ., df_impute)[,-1]
+df_X = data.frame(model.matrix(~ ., df_impute)[,-1])
+
+# Create matrix for glmnet
+library(caret)
+set.seed(123)
+train_index = createDataPartition(X[,1],p=0.8,list=F)
+
+
+x_train = X[train_index,]
+y_train = df_impute[train_index,11]
+x_test = X[-train_index,]
+y_test = df_impute[-train_index,11]
+
+df_X_test = df_X[-train_index]
+df_X_test
+
+
+lm_fit = lm(price ~ ., data=df_X, subset = train_index)
+summary(lm_fit)
+
+#lm_pred_train = predict(lm_fit, newdata=df_X[train_index,-66])
+#print(mean((lm_pred_train - y_train)^2))
+mean(residuals(lm_fit)^2)
+
+lm_pred = predict(lm_fit, newdata=df_X_test)
+#lm_pred = predict(lm_fit, newdata=df_impute[-train_index,-11])
+print(mean((lm_pred - y_test)^2))
+
+```
+
+```{r meadian impute lasso, ridge}
+library(glmnet)
+cv_lasso = cv.glmnet(x_train, y_train, alpha=0)
+lasso_pred = predict(cv_lasso, newx = x_test,s=cv_lasso$lambda.min)
+lasso_pred_train = predict(cv_lasso, newx = x_train,s=cv_lasso$lambda.min)
+mean((lasso_pred_train-y_train)^2)
+
+cv_ridge = cv.glmnet(x_train, y_train, alpha=1)
+ridge_pred = predict(cv_ridge, newx = x_test, s=cv_ridge$lambda.min)
+ridge_pred_train = predict(cv_ridge, newx = x_train, s=cv_ridge$lambda.min)
+mean((ridge_pred_train-y_train)^2)
+
+cat("Lasso:", mean((lasso_pred-y_test)^2),"\n Min Lambda:",cv_lasso$lambda.min,
+    "\n Ridge:",mean((ridge_pred-y_test)^2), "\n Min Lambda:",cv_ridge$lambda.min)
+```
+
+```{r random forest}
+library(randomForest)
+rf = randomForest(price ~ ., data=df_X,subset=train_index ,importance=T)
+
+rf
+
+# Important features
+rf_imp = sort(importance(rf)[,2], decreasing = T)[1:10]
+rf_pred = predict(rf, newdata=df_X[-train_index,-66])
+mean((rf_pred - y_test)^2)
+rf_pred_train = predict(rf, newdata=df_X[train_index,-66])
+mean((rf_pred_train - y_train)^2)
+
+rf_imp = sort(importance(rf)[,2], decreasing = T)[1:10]
+rf_imp_df = data.frame(value=rf_imp,features=names(rf_imp))
+
+library(ggplot2)
+ggplot(rf_imp_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Mean Decrease Accuracy") +ylab("Features") 
+
+
+```
+
+
+## Classification
+```{r logit}
+#Remove missing values from the response
+
+df_impute =  df_impute_ori %>% mutate(host_is_superhost = listings$host_is_superhost) %>% filter(!is.na(host_is_superhost))
+
+# Cast as factor for random forest classification
+X = model.matrix(host_is_superhost ~ ., df_impute)[,-1]
+df_X = cbind(data.frame(X),host_is_superhost = as.factor(df_impute$host_is_superhost))
+
+
+x_train = X[train_index,]
+y_train = as.factor(df_X[train_index,81])
+x_test = X[-train_index,]
+y_test = df_impute$host_is_superhost[-train_index]
+
+
+lr_fit = glm(host_is_superhost ~., data=df_X, subset=train_index, family="binomial")
+summary(lr_fit)
+lr_prob = predict(lr_fit, newdata = df_X[-train_index,-81], type = "response")
+lr_pred = ifelse(lr_prob > .5, "t", "f")
+mean(lr_pred == y_test)
+
+lr_prob_train = predict(lr_fit, newdata = df_X[train_index,-81], type = "response")
+lr_pred_train = ifelse(lr_prob_train > .5,"t","f")
+mean(lr_pred_train == y_train)
+```
+```{r logit conf}
+table(lr_pred, y_test)
+```
+```{r lasso and ridge}
+library(glmnet)
+
+lasso_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 0)
+lasso_pred = predict(lasso_cl_fit, newx = x_test, s =lasso_cl_fit$lambda.min, type='class')
+lasso_pred_train = predict(lasso_cl_fit, newx = x_train, s =lasso_cl_fit$lambda.min, type='class') 
+mean(lasso_pred_train == y_train)
+mean(lasso_pred == y_test)
+
+
+ridge_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 1)
+ridge_pred = predict(ridge_cl_fit, newx = x_test, s =ridge_cl_fit$lambda.min, type='class')
+ridge_pred_train = predict(ridge_cl_fit, newx = x_train, s =lasso_cl_fit$lambda.min, type='class') 
+mean(ridge_pred_train == y_train)
+dim(x_train)
+mean(ridge_pred == y_test)
+
+
+
+cat("Lasso:", mean(lasso_pred == y_test),"\n Min Lambda:",lasso_cl_fit$lambda.min,
+    "\n Ridge:",mean(ridge_pred == y_test), "\n Min Lambda:",ridge_cl_fit$lambda.min)
+```
+```{r lasso conf}
+table(lasso_pred,y_test)
+```
+```{r ridge conf}
+table(ridge_pred,y_test)
+```
+```{r random forest}
+rf = randomForest(host_is_superhost ~ ., data=df_X,subset=train_index ,importance=T)
+saveRDS(rf,'rf_med_class.rds')
+rf = readRDS('rf_med_class.rds')
+
+rf_pred = predict(rf, newdata = df_X[-train_index,-81])
+mean(rf_pred == y_test)
+rf_pred_train = predict(rf, newdata = df_X[train_index,-81])
+mean(rf_pred_train == y_train)
+
+table(rf_pred,y_test)
+
+imp_fea = sort(importance(rf)[,2], decreasing = T)[1:10]
+imp_fea_df = data.frame(value = imp_fea, features = names(imp_fea))
+library(ggplot2)
+ggplot(imp_fea_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Gini index") +ylab("Features") 
+```
+
+
+```{r svm}
+svm_fit = tune(svm,host_is_superhost ~ ., data=df_X[train_index, ], ranges=list(cost = c(0.1, 1, 10, 100, 1000), gamma = c(0.5, 1, 2, 3, 4)))
+
+svm_train = predict(svm_fit$best.model, df_X[train_index,])
+
+mean(svm_train == y_train)
+
+svm_pred = predict(svm_fit$best.model, df_X[-train_index,])
+mean(svm_pred == y_test)
+```
+
+```{r rf conf}
+table(rf_pred,y_test)
+```
+
+# PCA imputation
+```{r PCA imputation}
+library(missMDA)
+# Estimate the number of optimal dimensions for PCA imputation
+# Only run PCA on continuos variables excluding price
+df_num =  listings[, !sapply(listings, is.character)]
+price_col = grep("price",colnames(df_num))
+
+df_num = df_num %>% select(!c(neighbourhood_group_cleansed,calendar_updated,price))
+
+df_num = df_num %>% select(!price)
+
+ncp = estim_ncpPCA(df_num[,-price_col], scale = F)
+df_pca_num = data.frame(imputePCA(df_num[,-price_col], ncp=ncp$ncp,scale=F)$completeObs)
+
+
+# combine categorical variable with conntinuous and price
+df_pca_ori = cbind(df_pca_num, listings[, sapply(listings, is.character)],price = listings$price)
+colnames(df_pca_ori)
+#impute with host_is_superhost with mode 
+
+df_pca = df_pca_ori %>% mutate(host_is_superhost = replace_na(host_is_superhost,"f"))
+```
+
+```{r PCA data prep}
+# Remove missing rows from price
+df_pca = df_pca %>% filter(!is.na(price))
+
+df_pca = df_pca %>% select(c("host_listings_count",
+             "neighbourhood_cleansed",
+             "latitude",
+             "longitude",
+             "property_type",
+             "room_type",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating",
+             "host_is_superhost") | starts_with("review"))
+
+```
+## Regression
+```{r price}
+# Linear Regression
+
+# Create df with one hot encoding
+X = model.matrix(price~ ., df_pca)[,-1]
+df_X = data.frame(model.matrix(~ ., df_pca)[,-1])
+
+# Create matrix for glmnet
+library(caret)
+set.seed(2)
+train_index = createDataPartition(df_X$price, p=0.8,list=F)
+x_train = X[train_index,]
+y_train = df_pca[train_index,11]
+x_test = X[-train_index,]
+y_test = df_pca[-train_index,11]
+
+
+lm_fit = lm(price ~ ., data=df_X, subset = train_index)
+summary(lm_fit)
+lm_pred = predict(lm_fit, newdata=df_X[-train_index,-66])
+
+mean(lm_fit$residuals^2)
+print(mean((lm_pred - y_test)^2))
+```
+
+```{r lasso, ridge}
+library(glmnet)
+cv_lasso = cv.glmnet(x_train, y_train, alpha=0)
+lasso_pred = predict(cv_lasso, newx = x_test,s=cv_lasso$lambda.min)
+lasso_pred_train  = predict(cv_lasso, newx = x_train,s=cv_lasso$lambda.min)
+mean((lasso_pred_train-y_train)^2)
+
+cv_ridge = cv.glmnet(x_train, y_train, alpha=1)
+ridge_pred = predict(cv_ridge, newx = x_test, s=cv_ridge$lambda.min)
+ridge_pred_train  = predict(cv_ridge, newx = x_train,s=cv_lasso$lambda.min)
+mean((ridge_pred_train-y_train)^2)
+
+cat("Lasso:", mean((lasso_pred-y_test)^2),"\n Ridge:",mean((ridge_pred-y_test)^2))
+
+```
+
+```{r random forest}
+library(randomForest)
+rf = randomForest(price ~ ., data=df_X,subset=train_index ,importance=T)
+rf
+
+# Important features
+sort(importance(rf)[,2], decreasing = T)[1:10]
+rf_pred = predict(rf, newdata=df_X[-train_index,-66])
+rf_pred_train = predict(rf, newdata=df_X[train_index,-66])
+
+mean((rf_pred_train - y_train)^2)
+mean((rf_pred - y_test)^2)
+
+rf_imp = sort(importance(rf)[,2], decreasing = T)[1:10]
+rf_imp_df = data.frame(value=rf_imp,features=names(rf_imp))
+
+library(ggplot2)
+ggplot(rf_imp_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Mean Decrease Accuracy") +ylab("Features") 
+
+```
+
+# Classification
+```{r host_is_superhost imputation}
+library(missMDA)
+# Estimate the number of optimal dimensions for PCA imputation
+# Only run PCA on continuos variables 
+df_num =  listings[, !sapply(listings, is.character)]
+
+df_num = df_num %>% select(!c(neighbourhood_group_cleansed,calendar_updated))
+
+ncp = estim_ncpPCA(df_num, scale = F)
+df_pca_num = data.frame(imputePCA(df_num, ncp=ncp$ncp,scale=F)$completeObs)
+
+
+# combine categorical variable with conntinuous and price
+df_pca_ori = cbind(df_pca_num, listings[, sapply(listings, is.character)])
+```
+```{r logit}
+# Remove missing rows of host_is_super_host
+
+df_pca = df_pca_ori %>% filter(!is.na(host_is_superhost))
+
+df_pca = df_pca %>% select(c("host_listings_count",
+             "neighbourhood_cleansed",
+             "latitude",
+             "longitude",
+             "property_type",
+             "room_type",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating",
+             "host_is_superhost") | starts_with("review"))
+colSums(is.na(df_pca))
+
+X = model.matrix(host_is_superhost ~ ., df_pca)[,-1]
+df_X = cbind(data.frame(X),host_is_superhost = as.factor(df_pca$host_is_superhost))
+x_train = X[train_index,]
+y_train = as.factor(df_X[train_index,81])
+x_test = X[-train_index,]
+y_test = df_pca$host_is_superhost[-train_index]
+
+
+lr_fit = glm(host_is_superhost ~., data=df_X, subset=train_index, family="binomial")
+summary(lr_fit)
+lr_prob = predict(lr_fit, newdata = df_X[-train_index,-81], type = "response")
+lr_pred = ifelse(lr_prob > .5, "t", "f")
+table(lr_pred, y_test)
+mean(lr_pred ==  y_test)
+
+lr_prob_train = predict(lr_fit, newdata = df_X[train_index,-81], type = "response")
+lr_pred_train = ifelse(lr_prob_train > .5, "t", "f")
+mean(lr_pred_train == y_train)
+```
+
+```{r lasso and ridge}
+
+lasso_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 0)
+lasso_pred = predict(lasso_cl_fit, newx = x_test, s =lasso_cl_fit$lambda.min, type='class')
+lasso_pred_train = predict(lasso_cl_fit, newx = x_train, s =lasso_cl_fit$lambda.min, type='class')
+mean(lasso_pred_train == y_train)
+
+table(lasso_pred,y_test)
+
+ridge_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 1)
+ridge_pred = predict(ridge_cl_fit, newx = x_test, s =ridge_cl_fit$lambda.min, type='class')
+ridge_pred_train = predict(ridge_cl_fit, newx = x_train, s =ridge_cl_fit$lambda.min, type='class')
+mean(ridge_pred_train == y_train)
+
+
+
+
+table(ridge_pred,y_test)
+
+cat("Lasso:", mean(lasso_pred == y_test),"\n Ridge:",mean(ridge_pred == y_test))
+```
+```{r random forest}
+rf = randomForest(host_is_superhost ~ ., data=df_X,subset=train_index ,importance=T)
+saveRDS(rf,'rf_pca_class.rds')
+
+rf_pred = predict(rf, newdata = df_X[-train_index,-81])
+mean(rf_pred == y_test)
+
+rf_pred_train = predict(rf, newdata = df_X[train_index,-81])
+mean(rf_pred_train == y_train)
+
+table(rf_pred, y_test)
+
+imp_fea = sort(importance(rf)[,2], decreasing = T)[1:10]
+imp_fea_df = data.frame(value = imp_fea, features = names(imp_fea))
+
+ggplot(imp_fea_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Gini index") +ylab("Features")
+```
+
+```{r svm radial}
+svm_fit = tune(svm,host_is_superhost ~ ., data=df_X[train_index, ], kernel = "radial",
+               ranges=list(cost = c(0.1, 1, 10, 100, 1000), gamma = c(0,5,1,2,3,4)))
+
+summary(svm_fit$best.model)
+
+cat(svm_fit$best.model$cost,svm_fit$best.model$gamma)
+svm_train = predict(svm_fit$best.model, df_X[train_index,])
+
+mean(svm_train == y_train)
+
+svm_pred = predict(svm_fit$best.model, df_X[-train_index,])
+mean(svm_pred == y_test)
+```
+
+
+# KNN imputation
+```{r KNN imputation}
+library(VIM)
+library(magrittr)
+aggr(listings[,col_missing])
+# Find optimal k for knn
+
+# Run knn imputation on the varibles used
+col_missing_reg = col_missing[-5]
+col_missing_reg
+imp_knn_reg = kNN(listings, variable = col_missing_reg)
+saveRDS(imp_knn_reg,"imp_knn_reg.rds")
+imp_knn_reg = readRDS("imp_knn_reg.rds")
+
+# Remove missing values from price
+imp_knn_reg = imp_knn_reg %>% filter(!is.na(price))
+
+# Select useful features
+imp_knn_reg = imp_knn_reg %>% select(c("host_listings_count",
+             "neighbourhood_cleansed",
+             "latitude",
+             "longitude",
+             "property_type",
+             "room_type",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating",
+             "host_is_superhost") | starts_with("review"))
+```
+## Regression
+```{r linear regression}
+# Create df with one hot encoding
+X = model.matrix(price~ ., imp_knn_reg)[,-1]
+df_X = data.frame(model.matrix(~ ., imp_knn_reg)[,-1])
+
+# Create matrix for glmnet
+library(caret)
+set.seed(3)
+train_index = createDataPartition(df_X$price, p=0.8,list=F)
+x_train = X[train_index,]
+y_train = imp_knn_reg[train_index,11]
+x_test = X[-train_index,]
+y_test = imp_knn_reg[-train_index,11]
+
+
+lm_fit = lm(price ~ ., data=df_X, subset = train_index)
+summary(lm_fit)
+lm_pred = predict(lm_fit, newdata=df_X[-train_index,-66])
+mean((lm_fit$residuals)^2)
+print(mean((lm_pred - y_test)^2))
+```
+```{r lasso, ridge}
+library(glmnet)
+cv_lasso = cv.glmnet(x_train, y_train, alpha=0)
+lasso_pred = predict(cv_lasso, newx = x_test,s=cv_lasso$lambda.min)
+lasso_train = predict(cv_lasso, newx = x_train,s=cv_lasso$lambda.min)
+
+cv_ridge = cv.glmnet(x_train, y_train, alpha=1)
+ridge_pred = predict(cv_ridge, newx = x_test, s=cv_ridge$lambda.min)
+ridge_train = predict(cv_ridge, newx = x_train, s=cv_ridge$lambda.min)
+
+cat("Lasso:", mean((lasso_pred-y_test)^2),"\n Ridge:",mean((ridge_pred-y_test)^2))
+
+
+cat("Lasso:", mean((lasso_train-y_train)^2),"\n Ridge:",mean((ridge_train-y_train)^2))
+```
+```{r random forest}
+library(randomForest)
+rf = randomForest(price ~ ., data=df_X,subset=train_index ,importance=T)
+rf
+
+saveRDS(rf,"rf_knn_reg.rds")
+rf = readRDS("rf_knn_reg.rds")
+
+# Important features
+sort(importance(rf)[,2], decreasing = T)[1:10]
+rf_pred = predict(rf, newdata=df_X[-train_index,-66])
+mean((rf_pred - y_test)^2)
+
+rf_train =  predict(rf,newdata=df_X[train_index,-66])
+mean((rf_train - y_train)^2)
+
+
+
+rf_imp_df = data.frame(value=rf_imp,features=names(rf_imp))
+
+library(ggplot2)
+ggplot(rf_imp_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Mean Decrease Accuracy") +ylab("Features") 
+
+```
+## Classification
+```{r KNN imputation}
+library(VIM)
+library(magrittr)
+aggr(listings[,col_missing])
+# Run knn imputation on the varibles used
+host_super_col = grep("host",col_missing)
+col_missing_cla = col_missing[-host_super_col]
+col_missing_cla
+imp_knn_cla = kNN(listings, variable = col_missing_cla)
+
+# Remove missing values from price
+imp_knn_cla = imp_knn_cla %>% filter(!is.na(host_is_superhost))
+
+# Select useful features
+imp_knn_cla = imp_knn_cla %>% select(c("host_listings_count",
+             "neighbourhood_cleansed",
+             "latitude",
+             "longitude",
+             "property_type",
+             "room_type",
+             "accommodates",
+             "bathrooms",
+             "bedrooms",
+             "beds",
+             "price",
+             "number_of_reviews",
+             "review_scores_rating",
+             "host_is_superhost") | starts_with("review"))
+
+saveRDS(imp_knn_cla,"imp_knn_class.rds")
+```
+```{r logit}
+
+X = model.matrix(host_is_superhost ~ ., imp_knn_cla)[,-1]
+df_X = cbind(data.frame(X),host_is_superhost = as.factor(imp_knn_cla$host_is_superhost))
+
+x_train = X[train_index,]
+y_train = as.factor(df_X[train_index,89])
+x_test = X[-train_index,]
+y_test = df_X$host_is_superhost[-train_index]
+
+
+lr_fit = glm(host_is_superhost ~., data=df_X, subset=train_index, family="binomial")
+summary(lr_fit)
+lr_train = predict(lr_fit, df_X[train_index,])
+lr_train_prod = ifelse(lr_train > .5, "t", "f") 
+mean(lr_train_prod == y_train)
+
+lr_prob = predict(lr_fit, newdata = df_X[-train_index,-89], type = "response")
+lr_pred = ifelse(lr_prob > .5, "t", "f")
+table(lr_pred, y_test)
+mean(lr_pred ==  y_test)
+```
+
+```{r lasso and ridge}
+
+lasso_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 0)
+lass_train = predict(lasso_cl_fit, newx = x_train, s =lasso_cl_fit$lambda.min, type='class')
+mean(lass_train == y_train)
+
+lasso_pred = predict(lasso_cl_fit, newx = x_test, s =lasso_cl_fit$lambda.min, type='class')
+mean(lasso_pred == y_test)
+
+table(lasso_pred,y_test)
+
+ridge_cl_fit = cv.glmnet(x_train,y_train, family = "binomial", type.measure = "class",alpha = 1)
+
+ridge_train = predict(ridge_cl_fit, newx = x_train, s =lasso_cl_fit$lambda.min, type='class')
+mean(ridge_train == y_train)
+
+ridge_pred = predict(ridge_cl_fit, newx = x_test, s =ridge_cl_fit$lambda.min, type='class')
+mean(ridge_pred == y_test)
+
+table(ridge_pred,y_test)
+
+cat("Lasso:", mean(lasso_pred == y_test),"\n Ridge:",mean(ridge_pred == y_test))
+```
+```{r random forest}
+library(randomForest)
+rf = randomForest(host_is_superhost ~ ., data=df_X,subset=train_index ,importance=T)
+saveRDS(rf,"rf_knn_class.rds")
+
+
+rf_pred = predict(rf, newdata = df_X[-train_index,-89])
+mean(rf_pred == y_test)
+
+table(rf_pred,y_test)
+
+rf_train = predict(rf,df_X[train_index,-89])
+mean(rf_train == y_train)
+
+imp_fea = sort(importance(rf)[,2], decreasing = T)[1:10]
+imp_fea_df = data.frame(value = imp_fea, features = names(imp_fea))
+library(ggplot2)
+ggplot(imp_fea_df) + geom_col(aes(x=value,y=reorder(features,value)),fill='red') +
+  ggtitle("Top Ten Important Features") + xlab("Gini index") +ylab("Features")
+```
+```{r svm radial}
+svm_fit = tune(svm,host_is_superhost ~ ., data=df_X[train_index, ], kernel = "radial",
+               ranges=list(cost = c(0.1, 1, 10, 100, 1000), gamma = c(0,5,1,2,3,4)))
+
+summary(svm_fit$best.model)
+
+cat(svm_fit$best.model$cost,svm_fit$best.model$gamma)
+svm_train = predict(svm_fit$best.model, df_X[train_index,])
+
+mean(svm_train == y_train)
+
+svm_pred = predict(svm_fit$best.model, df_X[-train_index,])
+mean(svm_pred == y_test)
+```
+```{r missing values}
+library(VIM)
+par(mar=c(5, 8, 4, 2)+0.1)
+aggr(listings[,col_missing],combined=T,bars=F)
+plot(a,combined=F)
+
+
+```
